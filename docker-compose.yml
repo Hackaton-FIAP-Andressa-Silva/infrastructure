@@ -1,0 +1,177 @@
+services:
+  # ─────────────────────────────────────────
+  # Infrastructure Services
+  # ─────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: upload_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mongodb:
+    image: mongo:7.0
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  localstack:
+    image: localstack/localstack:3.4
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: s3,sqs
+      DEFAULT_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+    volumes:
+      - ./scripts/init-localstack.sh:/etc/localstack/init/ready.d/init-localstack.sh
+      - localstack_data:/var/lib/localstack
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ─────────────────────────────────────────
+  # Application Services
+  # ─────────────────────────────────────────
+
+  # One-shot container: applies Alembic migrations then exits.
+  # upload-service waits for successful completion before starting.
+  migrate:
+    build:
+      context: ../upload-service
+      dockerfile: Dockerfile
+    command: alembic upgrade head
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/upload_db
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - backend
+
+  upload-service:
+    build:
+      context: ../upload-service
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/upload_db
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_ENDPOINT_URL: http://localstack:4566
+      S3_BUCKET_NAME: architecture-diagrams
+      SQS_QUEUE_URL: http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/diagram-analysis-queue
+      INTERNAL_SERVICE_TOKEN: dev-internal-token
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      localstack:
+        condition: service_healthy
+    networks:
+      - backend
+      - frontend
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  ai-processing-service:
+    build:
+      context: ../ai-processing-service
+      dockerfile: Dockerfile
+    environment:
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY}
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_ENDPOINT_URL: http://localstack:4566
+      S3_BUCKET_NAME: architecture-diagrams
+      SQS_QUEUE_URL: http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/diagram-analysis-queue
+      UPLOAD_SERVICE_URL: http://upload-service:8001
+      REPORT_SERVICE_URL: http://report-service:8003
+      INTERNAL_SERVICE_TOKEN: dev-internal-token
+    depends_on:
+      localstack:
+        condition: service_healthy
+      upload-service:
+        condition: service_healthy
+      report-service:
+        condition: service_healthy
+    networks:
+      - backend
+
+  report-service:
+    build:
+      context: ../report-service
+      dockerfile: Dockerfile
+    ports:
+      - "8003:8003"
+    environment:
+      MONGODB_URL: mongodb://mongodb:27017
+      MONGODB_DATABASE: report_db
+      INTERNAL_SERVICE_TOKEN: dev-internal-token
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - backend
+      - frontend
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  api-gateway:
+    build:
+      context: ../api-gateway
+      dockerfile: Dockerfile
+    ports:
+      - "8080:80"
+    environment:
+      API_KEY: ${API_KEY:-dev-api-key}
+    depends_on:
+      upload-service:
+        condition: service_healthy
+      report-service:
+        condition: service_healthy
+    networks:
+      - backend
+      - frontend
+
+volumes:
+  postgres_data:
+  mongo_data:
+  localstack_data:
+
+networks:
+  backend:
+    driver: bridge
+  frontend:
+    driver: bridge
