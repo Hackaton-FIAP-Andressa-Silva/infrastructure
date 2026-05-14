@@ -36,7 +36,7 @@ resource "aws_db_subnet_group" "main" {
 resource "aws_db_instance" "postgres" {
   identifier             = "${local.name}-postgres"
   engine                 = "postgres"
-  engine_version         = "16.2"
+  engine_version         = "16"
   instance_class         = "db.t3.micro"
   allocated_storage      = 20
   db_name                = "upload_db"
@@ -74,3 +74,16 @@ resource "aws_secretsmanager_secret_version" "db_credentials" {
 
 output "endpoint"           { value = aws_db_instance.postgres.address }
 output "credentials_secret" { value = aws_secretsmanager_secret.db_credentials.arn }
+
+# Full DATABASE_URL stored as a secret so ECS tasks can inject it directly
+resource "aws_secretsmanager_secret" "db_url" {
+  name = "${var.environment}/fiap-hackaton/upload-service-db-url"
+  tags = local.tags
+}
+
+resource "aws_secretsmanager_secret_version" "db_url" {
+  secret_id     = aws_secretsmanager_secret.db_url.id
+  secret_string = "postgresql+asyncpg://${aws_db_instance.postgres.username}:${random_password.db.result}@${aws_db_instance.postgres.address}:5432/upload_db"
+}
+
+output "db_url_secret_arn" { value = aws_secretsmanager_secret.db_url.arn }

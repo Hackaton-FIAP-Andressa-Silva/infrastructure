@@ -9,12 +9,29 @@ variable "api_gateway_image"             { type = string }
 variable "upload_service_task_role"      { type = string }
 variable "ai_processing_task_role"       { type = string }
 variable "db_endpoint"                   { type = string }
-variable "mongodb_endpoint"              { type = string }
 variable "sqs_queue_url"                 { type = string }
 variable "s3_bucket_name"               { type = string }
 variable "aws_region"                    { type = string }
-variable "openai_api_key_secret_arn"     { type = string; sensitive = true }
-variable "internal_token_secret_arn"     { type = string; sensitive = true }
+variable "openai_api_key_secret_arn" {
+  type      = string
+  sensitive = true
+}
+variable "internal_token_secret_arn" {
+  type      = string
+  sensitive = true
+}
+variable "api_key_secret_arn" {
+  type      = string
+  sensitive = true
+}
+variable "db_url_secret_arn" {
+  type      = string
+  sensitive = true
+}
+variable "mongodb_url_secret_arn" {
+  type      = string
+  sensitive = true
+}
 
 # HTTPS / ACM — optional; if provided, enables TLS on the ALB
 variable "domain_name" {
@@ -52,26 +69,10 @@ resource "aws_ecs_cluster" "main" {
   }
 }
 
-# ECS Task Execution Role (pull images + write logs)
-data "aws_iam_policy_document" "ecs_exec_assume" {
-  statement {
-    actions = ["sts:AssumeRole"]
-    principals {
-      type        = "Service"
-      identifiers = ["ecs-tasks.amazonaws.com"]
-    }
-  }
-}
-
-resource "aws_iam_role" "ecs_execution" {
-  name               = "${local.name}-ecs-execution-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_exec_assume.json
-  tags               = local.tags
-}
-
-resource "aws_iam_role_policy_attachment" "ecs_execution" {
-  role       = aws_iam_role.ecs_execution.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+# AWS Academy restricts iam:CreateRole.
+# Use the pre-existing LabRole which already has ECS execution permissions.
+data "aws_iam_role" "lab_role" {
+  name = "LabRole"
 }
 
 # Security Groups
@@ -107,7 +108,7 @@ resource "aws_security_group" "alb" {
 
 resource "aws_security_group" "ecs_tasks" {
   name        = "${local.name}-ecs-tasks-sg"
-  description = "ECS tasks — inbound from ALB only"
+  description = "ECS tasks - inbound from ALB only"
   vpc_id      = var.vpc_id
 
   ingress {
@@ -216,26 +217,97 @@ resource "aws_lb_listener" "https" {
   depends_on = [aws_acm_certificate.api]
 }
 
-# Service Discovery (internal DNS via Cloud Map)
-resource "aws_service_discovery_private_dns_namespace" "internal" {
-  name = "${local.name}.internal"
-  vpc  = var.vpc_id
+# ─── Internal ALB (service-to-service communication) ───────────────────────
+# Cloud Map service discovery is unavailable in AWS Academy.
+# An internal ALB gives api-gateway and ai-processing stable DNS hostnames.
+resource "aws_security_group" "internal_alb" {
+  name        = "${local.name}-int-alb-sg"
+  description = "Internal ALB - ECS to ECS traffic"
+  vpc_id      = var.vpc_id
+
+  ingress {
+    from_port   = 8001
+    to_port     = 8001
+    protocol    = "tcp"
+    cidr_blocks = ["10.0.0.0/16"]
+  }
+
+  ingress {
+    from_port   = 8003
+    to_port     = 8003
+    protocol    = "tcp"
+    cidr_blocks = ["10.0.0.0/16"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
   tags = local.tags
 }
 
-resource "aws_service_discovery_service" "upload" {
-  name = "upload-service"
-  dns_config {
-    namespace_id = aws_service_discovery_private_dns_namespace.internal.id
-    dns_records { ttl = 10; type = "A" }
+resource "aws_lb" "internal" {
+  name               = "${local.name}-int-alb"
+  internal           = true
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.internal_alb.id]
+  subnets            = var.private_subnet_ids
+  tags               = local.tags
+}
+
+resource "aws_lb_target_group" "upload_service" {
+  name        = "${local.name}-upload-svc-tg"
+  port        = 8001
+  protocol    = "HTTP"
+  vpc_id      = var.vpc_id
+  target_type = "ip"
+
+  health_check {
+    path                = "/health"
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    interval            = 30
+  }
+  tags = local.tags
+}
+
+resource "aws_lb_target_group" "report_service" {
+  name        = "${local.name}-report-svc-tg"
+  port        = 8003
+  protocol    = "HTTP"
+  vpc_id      = var.vpc_id
+  target_type = "ip"
+
+  health_check {
+    path                = "/health"
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    interval            = 30
+  }
+  tags = local.tags
+}
+
+resource "aws_lb_listener" "upload_internal" {
+  load_balancer_arn = aws_lb.internal.arn
+  port              = 8001
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.upload_service.arn
   }
 }
 
-resource "aws_service_discovery_service" "report" {
-  name = "report-service"
-  dns_config {
-    namespace_id = aws_service_discovery_private_dns_namespace.internal.id
-    dns_records { ttl = 10; type = "A" }
+resource "aws_lb_listener" "report_internal" {
+  load_balancer_arn = aws_lb.internal.arn
+  port              = 8003
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.report_service.arn
   }
 }
 
@@ -247,20 +319,21 @@ resource "aws_ecs_task_definition" "upload_service" {
   requires_compatibilities = ["FARGATE"]
   cpu                      = 512
   memory                   = 1024
-  execution_role_arn       = aws_iam_role.ecs_execution.arn
+  execution_role_arn       = data.aws_iam_role.lab_role.arn
   task_role_arn            = var.upload_service_task_role
 
   container_definitions = jsonencode([{
     name      = "upload-service"
     image     = var.upload_service_image
     essential = true
-    portMappings = [{ containerPort = 8001; protocol = "tcp" }]
+    portMappings = [{ containerPort = 8001, protocol = "tcp" }]
     environment = [
       { name = "AWS_REGION",      value = var.aws_region },
       { name = "S3_BUCKET_NAME",  value = var.s3_bucket_name },
       { name = "SQS_QUEUE_URL",   value = var.sqs_queue_url },
     ]
     secrets = [
+      { name = "DATABASE_URL",           valueFrom = var.db_url_secret_arn },
       { name = "INTERNAL_SERVICE_TOKEN", valueFrom = var.internal_token_secret_arn }
     ]
     logConfiguration = {
@@ -281,7 +354,7 @@ resource "aws_ecs_task_definition" "ai_processing" {
   requires_compatibilities = ["FARGATE"]
   cpu                      = 1024
   memory                   = 2048
-  execution_role_arn       = aws_iam_role.ecs_execution.arn
+  execution_role_arn       = data.aws_iam_role.lab_role.arn
   task_role_arn            = var.ai_processing_task_role
 
   container_definitions = jsonencode([{
@@ -292,8 +365,8 @@ resource "aws_ecs_task_definition" "ai_processing" {
       { name = "AWS_REGION",          value = var.aws_region },
       { name = "S3_BUCKET_NAME",      value = var.s3_bucket_name },
       { name = "SQS_QUEUE_URL",       value = var.sqs_queue_url },
-      { name = "UPLOAD_SERVICE_URL",  value = "http://upload-service.${local.name}.internal:8001" },
-      { name = "REPORT_SERVICE_URL",  value = "http://report-service.${local.name}.internal:8003" },
+      { name = "UPLOAD_SERVICE_URL",  value = "http://${aws_lb.internal.dns_name}:8001" },
+      { name = "REPORT_SERVICE_URL",  value = "http://${aws_lb.internal.dns_name}:8003" },
     ]
     secrets = [
       { name = "GOOGLE_API_KEY",         valueFrom = var.openai_api_key_secret_arn },
@@ -317,18 +390,18 @@ resource "aws_ecs_task_definition" "report_service" {
   requires_compatibilities = ["FARGATE"]
   cpu                      = 512
   memory                   = 1024
-  execution_role_arn       = aws_iam_role.ecs_execution.arn
+  execution_role_arn       = data.aws_iam_role.lab_role.arn
 
   container_definitions = jsonencode([{
     name      = "report-service"
     image     = var.report_service_image
     essential = true
-    portMappings = [{ containerPort = 8003; protocol = "tcp" }]
+    portMappings = [{ containerPort = 8003, protocol = "tcp" }]
     environment = [
-      { name = "MONGODB_URL",      value = "mongodb://${var.mongodb_endpoint}:27017" },
       { name = "MONGODB_DATABASE", value = "report_db" },
     ]
     secrets = [
+      { name = "MONGODB_URL",            valueFrom = var.mongodb_url_secret_arn },
       { name = "INTERNAL_SERVICE_TOKEN", valueFrom = var.internal_token_secret_arn }
     ]
     logConfiguration = {
@@ -349,19 +422,19 @@ resource "aws_ecs_task_definition" "api_gateway" {
   requires_compatibilities = ["FARGATE"]
   cpu                      = 256
   memory                   = 512
-  execution_role_arn       = aws_iam_role.ecs_execution.arn
+  execution_role_arn       = data.aws_iam_role.lab_role.arn
 
   container_definitions = jsonencode([{
     name      = "api-gateway"
     image     = var.api_gateway_image
     essential = true
-    portMappings = [{ containerPort = 80; protocol = "tcp" }]
+    portMappings = [{ containerPort = 80, protocol = "tcp" }]
     environment = [
-      { name = "UPLOAD_SERVICE_URL", value = "http://upload-service.${local.name}.internal:8001" },
-      { name = "REPORT_SERVICE_URL", value = "http://report-service.${local.name}.internal:8003" },
+      { name = "UPLOAD_SERVICE_URL", value = "http://${aws_lb.internal.dns_name}:8001" },
+      { name = "REPORT_SERVICE_URL", value = "http://${aws_lb.internal.dns_name}:8003" },
     ]
     secrets = [
-      { name = "API_KEY", valueFrom = var.internal_token_secret_arn }
+      { name = "API_KEY", valueFrom = var.api_key_secret_arn }
     ]
     logConfiguration = {
       logDriver = "awslogs"
@@ -390,8 +463,10 @@ resource "aws_ecs_service" "upload_service" {
     assign_public_ip = false
   }
 
-  service_registries {
-    registry_arn = aws_service_discovery_service.upload.arn
+  load_balancer {
+    target_group_arn = aws_lb_target_group.upload_service.arn
+    container_name   = "upload-service"
+    container_port   = 8001
   }
 
   tags = local.tags
@@ -426,8 +501,10 @@ resource "aws_ecs_service" "report_service" {
     assign_public_ip = false
   }
 
-  service_registries {
-    registry_arn = aws_service_discovery_service.report.arn
+  load_balancer {
+    target_group_arn = aws_lb_target_group.report_service.arn
+    container_name   = "report-service"
+    container_port   = 8003
   }
 
   tags = local.tags

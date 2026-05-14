@@ -37,7 +37,10 @@ resource "aws_s3_bucket_lifecycle_configuration" "diagrams" {
   rule {
     id     = "expire-old-uploads"
     status = "Enabled"
-    expiration { days = 90 }
+    filter {}
+    expiration {
+      days = 90
+    }
   }
 }
 

@@ -5,6 +5,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.50"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }
   }
 
   backend "s3" {
@@ -41,10 +45,11 @@ module "rds" {
 }
 
 module "documentdb" {
-  source             = "./modules/documentdb"
-  environment        = var.environment
-  vpc_id             = module.networking.vpc_id
-  private_subnet_ids = module.networking.private_subnet_ids
+  source               = "./modules/documentdb"
+  environment          = var.environment
+  vpc_id               = module.networking.vpc_id
+  private_subnet_ids   = module.networking.private_subnet_ids
+  mongodb_url_override = var.mongodb_url
 }
 
 module "ecr" {
@@ -73,12 +78,24 @@ module "ecs" {
   upload_service_task_role   = module.iam.upload_service_role_arn
   ai_processing_task_role    = module.iam.ai_processing_role_arn
   db_endpoint                = module.rds.endpoint
-  mongodb_endpoint           = module.documentdb.endpoint
+  db_url_secret_arn          = module.rds.db_url_secret_arn
+  mongodb_url_secret_arn     = module.documentdb.mongodb_url_secret_arn
   sqs_queue_url              = module.sqs.queue_url
   s3_bucket_name             = module.s3.bucket_name
   aws_region                 = var.aws_region
   openai_api_key_secret_arn  = aws_secretsmanager_secret.google_api_key.arn
   internal_token_secret_arn  = aws_secretsmanager_secret.internal_token.arn
+  api_key_secret_arn         = aws_secretsmanager_secret.api_key.arn
+}
+
+resource "aws_secretsmanager_secret" "api_key" {
+  name        = "${var.environment}/fiap-hackaton/api-key"
+  description = "External API key for clients (X-API-Key header)"
+}
+
+resource "aws_secretsmanager_secret_version" "api_key" {
+  secret_id     = aws_secretsmanager_secret.api_key.id
+  secret_string = var.api_key
 }
 
 # Secrets
