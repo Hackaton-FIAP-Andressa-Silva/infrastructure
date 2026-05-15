@@ -36,22 +36,23 @@ Infrastructure-as-code and local development stack for the FIAP Architecture Ana
 | Component | Purpose |
 |---|---|
 | **ECS Fargate** | Container runtime for all 4 services |
-| **ALB** | Application Load Balancer — public entry point |
+| **ALB (public)** | External entry point; routes to api-gateway |
+| **ALB (internal)** | Internal routing between api-gateway and upstream services |
 | **ECR** | Private container registry (one repo per service) |
 | **RDS PostgreSQL 16** | upload-service database |
-| **DocumentDB** | report-service (MongoDB-compatible) |
+| **MongoDB Atlas M0** | report-service — free-tier managed MongoDB (replaces DocumentDB; blocked in AWS Academy) |
 | **S3** | Diagram storage |
 | **SQS + DLQ** | Async job queue between upload and AI services |
-| **Secrets Manager** | `GOOGLE_API_KEY` and `INTERNAL_SERVICE_TOKEN` |
-| **VPC** | Isolated network; services run in private subnets; ALB in public |
-| **IAM** | Least-privilege task roles per service |
+| **Secrets Manager** | `GOOGLE_API_KEY`, `INTERNAL_SERVICE_TOKEN`, `API_KEY`, `MONGODB_URL` |
+| **VPC** | Isolated network; services run in private subnets; ALBs in public/private |
+| **IAM** | `LabRole` (AWS Academy pre-provisioned role) used as ECS task execution role |
 
 ### Local Stack (Docker Compose)
 
 | Component | Replaces |
 |---|---|
 | `postgres:16-alpine` | RDS |
-| `mongo:7.0` | DocumentDB |
+| `mongo:7.0` | MongoDB Atlas |
 | `localstack:3.4` (S3 + SQS) | AWS S3 + SQS |
 
 ---
@@ -63,11 +64,11 @@ Infrastructure-as-code and local development stack for the FIAP Architecture Ana
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) ≥ 4.x
 - A Google Gemini API key — get one free at [aistudio.google.com](https://aistudio.google.com) (use a project **without billing** for the free tier)
 
-### 1. Clone all service repos into the same parent folder
+### 1. All services live in the same repository
 
 ```
-parent/
-├── infrastructure/    ← this repo
+hackaton-fiap/        ← monorepo root
+├── infrastructure/     ← you are here
 ├── upload-service/
 ├── ai-processing-service/
 ├── report-service/

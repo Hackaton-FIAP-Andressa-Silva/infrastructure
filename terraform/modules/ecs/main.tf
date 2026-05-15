@@ -430,8 +430,10 @@ resource "aws_ecs_task_definition" "api_gateway" {
     essential = true
     portMappings = [{ containerPort = 80, protocol = "tcp" }]
     environment = [
-      { name = "UPLOAD_SERVICE_URL", value = "http://${aws_lb.internal.dns_name}:8001" },
-      { name = "REPORT_SERVICE_URL", value = "http://${aws_lb.internal.dns_name}:8003" },
+      { name = "UPLOAD_SERVICE_URL",  value = "http://${aws_lb.internal.dns_name}:8001" },
+      { name = "REPORT_SERVICE_URL",  value = "http://${aws_lb.internal.dns_name}:8003" },
+      { name = "UPLOAD_SERVICE_HOST", value = "${aws_lb.internal.dns_name}:8001" },
+      { name = "REPORT_SERVICE_HOST", value = "${aws_lb.internal.dns_name}:8003" },
     ]
     secrets = [
       { name = "API_KEY", valueFrom = var.api_key_secret_arn }

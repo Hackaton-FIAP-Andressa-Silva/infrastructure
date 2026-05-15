@@ -156,6 +156,8 @@ services:
       - "8080:80"
     environment:
       API_KEY: ${API_KEY:-dev-api-key}
+      UPLOAD_SERVICE_HOST: upload-service:8001
+      REPORT_SERVICE_HOST: report-service:8003
     depends_on:
       upload-service:
         condition: service_healthy
