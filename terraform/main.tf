@@ -118,3 +118,5 @@ resource "aws_secretsmanager_secret_version" "internal_token" {
   secret_id     = aws_secretsmanager_secret.internal_token.id
   secret_string = var.internal_service_token
 }
+
+# ci trigger
